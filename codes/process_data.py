@@ -2,18 +2,10 @@ import os
 
 os.environ["PYARROW_IGNORE_TIMEZONE"] = "1"
 import datetime
-import logging
 import pyspark.pandas as ps
 import pyspark.sql.functions as f
 from pyspark.sql import DataFrame
 from pyspark.sql import SparkSession
-
-
-def setup_logging():
-    """Configura o log da aplicação."""
-    logging.basicConfig(
-        level=logging.INFO, format="[%(asctime)s] [%(levelname)s] - %(message)s"
-    )
 
 
 def init_spark() -> SparkSession:
@@ -22,10 +14,10 @@ def init_spark() -> SparkSession:
     Returns:
         SparkSession: Sessão do Spark inicializada.
     """
-    logging.info("Inicializando SparkSession.")
     spark = SparkSession.builder.getOrCreate()
-    spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
-    logging.info("SparkSession inicializada com sucesso.")
+    spark.conf.set(
+        "spark.sql.legacy.timeParserPolicy", "LEGACY"
+    )  # evita erro ao parsear data
     return spark
 
 
@@ -41,10 +33,7 @@ def load_data(
     Returns:
         ps.DataFrame: DataFrame carregado com os dados.
     """
-    logging.info(f"Carregando dados do arquivo 'task{task_number}'.")
-    data = ps.read_parquet(os.path.join(path, f"task{task_number}"))
-    logging.info(f"Dados do arquivo 'task{task_number}' carregados com sucesso.")
-    return data
+    return ps.read_parquet(os.path.join(path, f"task{task_number}"))
 
 
 def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
@@ -56,7 +45,6 @@ def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
     Returns:
         DataFrame: DataFrame Spark após transformação.
     """
-    logging.info("Iniciando transformação do DataFrame.")
     month_dict = {
         "Jan": 1,
         "Fev": 2,
@@ -101,7 +89,6 @@ def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
         "SÃO PAULO": "SP",
         "TOCANTINS": "TO",
     }
-    logging.info("Despivotando dados e aplicando alterações em meses e UFs.")
     df_pandas_melt = (
         ps.melt(
             df_pandas,
@@ -114,7 +101,6 @@ def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
         .replace({"MES": month_dict})
         .replace({"ESTADO": uf_dict})
     )
-    logging.info("Transformação do DataFrame concluída com sucesso.")
     return df_pandas_melt.to_spark()
 
 
@@ -128,8 +114,7 @@ def format_columns(df_spark: DataFrame, now: datetime.datetime) -> DataFrame:
     Returns:
         DataFrame: DataFrame após formatação.
     """
-    logging.info("Formatando colunas.")
-    df_fmt = (
+    return (
         df_spark.withColumn("ANO", f.col("ANO").cast("integer"))
         .withColumn(
             "MES",
@@ -150,12 +135,10 @@ def format_columns(df_spark: DataFrame, now: datetime.datetime) -> DataFrame:
         )
         .select("year_month", "uf", "product", "unit", "volume", "created_at")
     )
-    logging.info("Colunas formatadas com sucesso.")
-    return df_fmt
 
 
-def validate_data(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
-    """Valida os dados entre DataFrame Spark e DataFrame pandas.
+def validate_data_amount(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
+    """Valida as somas entre DataFrame Spark e DataFrame pandas.
 
     Args:
         df_spark (DataFrame): DataFrame Spark para validação.
@@ -164,33 +147,69 @@ def validate_data(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
     Returns:
         DataFrame: DataFrame Spark após validação.
     """
-    logging.info("Iniciando validação dos dados.")
     df_pandas_validation = df_pandas.to_spark()
-    df_validation = df_spark.groupBy(
+    df_spark_validation = df_spark.groupBy(
         [
             f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
             "uf",
             "product",
         ]
     ).agg(f.sum("volume").alias("amount"))
-    df_validation_f = df_validation.join(
+    validate_amount = df_spark_validation.join(
         df_pandas_validation,
-        (df_validation.year == df_pandas_validation.ANO)
-        & (df_validation.uf == df_pandas_validation.ESTADO)
+        (df_spark_validation.year == df_pandas_validation.ANO)
+        & (df_spark_validation.uf == df_pandas_validation.ESTADO)
         & (f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == f.col("product")),
         "inner",
     )
 
-    logging.info("Validação dos dados concluída.")
-    df_val = df_validation_f.select(
+    validation = validate_amount.select(
         "year",
         "uf",
         "product",
         f.col("TOTAL").alias("amount_pandas").cast("float"),
         f.col("amount").alias("amount_spark").cast("float"),
     ).filter(f.col("amount").cast("float") != f.col("TOTAL").cast("float"))
-    logging.info("Validação dos dados concluída.")
-    return df_val
+    return validation
+
+
+def validate_data_count(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
+    """Valida a contagem de registros entre DataFrame Spark e DataFrame pandas.
+
+    Args:
+        df_spark (DataFrame): DataFrame Spark para validação.
+        df_pandas (ps.DataFrame): DataFrame do pandas para comparação.
+
+    Returns:
+        DataFrame: DataFrame Spark após validação.
+    """
+    df_pandas_validation = df_pandas.to_spark()
+    df_spark_validation = df_spark.groupBy(
+        [
+            f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
+            "uf",
+            "product",
+        ]
+    ).agg(f.count("*").alias("count_spark"))
+    df_pandas_count = df_pandas_validation.groupBy(
+        ["ANO", "ESTADO", "COMBUSTÍVEL"]
+    ).agg(f.count("*").alias("count_pandas"))
+    validate_count = df_spark_validation.join(
+        df_pandas_count,
+        (df_spark_validation.year == df_pandas_count.ANO)
+        & (df_spark_validation.uf == df_pandas_count.ESTADO)
+        & (f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == f.col("product")),
+        "inner",
+    )
+
+    validation = validate_count.select(
+        "year",
+        "uf",
+        "product",
+        f.col("count_pandas"),
+        f.col("count_spark"),
+    ).filter(f.col("count_spark") != f.col("count_pandas"))
+    return validation
 
 
 def save_data(
@@ -199,17 +218,14 @@ def save_data(
     task_number: int = None,
 ):
     """Salva o DataFrame Spark como parquet.
-
     Args:
         df_spark (DataFrame): DataFrame Spark para salvar.
         path (str): Caminho base para salvar os dados.
         task_number (int): Número da tarefa para construir o caminho completo.
     """
-    logging.info(f"Salvando dados no diretório 'processed/task{task_number}'.")
     df_spark.write.mode("overwrite").partitionBy(["uf", "product"]).format(
         "parquet"
     ).save(os.path.join(path, f"task{task_number}"))
-    logging.info(f"Dados salvos com sucesso.")
 
 
 def main(task_number: int):
@@ -218,8 +234,6 @@ def main(task_number: int):
     Args:
         task_number (int): Número da tarefa para carregar e salvar dados.
     """
-    logging.info(f"Iniciando processamento para 'task{task_number}'.")
-    setup_logging()
     spark = init_spark()
 
     now = datetime.datetime.now()
@@ -227,11 +241,13 @@ def main(task_number: int):
     df_spark = transform_data(df_pandas)
     df_spark = format_columns(df_spark, now)
 
-    df_validation_f = validate_data(df_spark, df_pandas)
-    df_validation_f.show()
+    validate_amount = validate_data_amount(df_spark, df_pandas)
+    validate_amount.show()
 
-    save_data(df_spark, task_number=task_number)
-    logging.info(f"Processamento para 'task{task_number}' concluído com sucesso.")
+    validate_count = validate_data_count(df_spark, df_pandas)
+    validate_count.show()
+
+    save_data(df_spark, spark=spark, task_number=task_number)
 
 
 if __name__ == "__main__":
