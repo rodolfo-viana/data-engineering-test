@@ -1,3 +1,16 @@
+# Resolução
+
+Os códigos estão em `codes`. Eles formam o seguinte desenho:
+
+![](./images/diagrama.png)
+
+Os dados brutos estão em `data_output > raw`.
+
+Os dados processados estão em `data_output > processed`.
+
+
+# Proposta inicial enviada pela Raízen
+
 Data Engineering Test
 =====================
 
