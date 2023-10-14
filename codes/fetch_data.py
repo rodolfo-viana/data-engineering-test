@@ -76,41 +76,6 @@ def extract_data(worksheet, dynamic_table: str, task_num: int) -> None:
     logging.info(f"Dados salvos em {output_path}")
 
 
-# def extract_data(worksheet, dynamic_table: str, task_num: int) -> None:
-#    """Extrai os dados da tabela dinâmica e salva como arquivo parquet.
-#
-#    Args:
-#        worksheet: Planilha.
-#        dynamic_table (str): Nome da tabela dinâmica.
-#        task_num (int): Número da tarefa para nomeação do arquivo de saída.
-#    """
-#    logging.info(f"Extraindo dados da tabela {dynamic_table}.")
-#    pivot = next(p for p in worksheet._pivots if p.name == dynamic_table)
-#
-#    field_map = {}
-#    for field in pivot.cache.cacheFields:
-#        if field.sharedItems.count > 0:
-#            field_map[field.name] = [item.v for item in field.sharedItems._fields]
-#
-#    column_labels = [field.name for field in pivot.cache.cacheFields]
-#    records = []
-#    for record in pivot.cache.records.r:
-#        record_values = [
-#            f.v if not isinstance(f, Missing) else np.nan for f in record._fields
-#        ]
-#        record_dict = dict(zip(column_labels, record_values))
-#
-#        for key in field_map:
-#            record_dict[key] = field_map[key][record_dict[key]]
-#
-#        records.append(record_dict)
-#
-#    df = ps.DataFrame.from_dict(records)
-#    output_path = f"../data_output/raw/task{task_num + 1}"
-#    df.to_parquet(output_path)
-#    logging.info(f"Dados salvos em {output_path}.")
-
-
 def main(xls_file: str, wb_name: str):
     """Executa as funções em ordem.
 
