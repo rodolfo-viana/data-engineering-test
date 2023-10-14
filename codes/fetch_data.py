@@ -1,12 +1,19 @@
 import os
 
 os.environ["PYARROW_IGNORE_TIMEZONE"] = "1"
+
 import numpy as np
-import pyspark.pandas as pd
+from pyspark import SparkContext
+
+sc = SparkContext.getOrCreate()
+sc.setLogLevel("ERROR")
+
+import pyspark.pandas as ps
 import win32com.client as win32
 from openpyxl import load_workbook
 from openpyxl.pivot.fields import Missing
 import logging
+
 
 logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] [%(levelname)s] - %(message)s"
@@ -19,7 +26,7 @@ def convert_xls_xlsx(file_path: str) -> None:
     Args:
         file_path (str): Caminho absoluto para o arquivo .xls.
     """
-    logging.info("Convertendo .xls para .xlsx")
+    logging.info("Convertendo .xls para .xlsx temporário.")
     excel_app = win32.gencache.EnsureDispatch("Excel.Application")
     workbook = excel_app.Workbooks.Open(file_path)
 
@@ -27,10 +34,10 @@ def convert_xls_xlsx(file_path: str) -> None:
     workbook.SaveAs(new_path, FileFormat=51)
     workbook.Close()
     excel_app.Application.Quit()
-    logging.info(f"Arquivo salvo como {new_path}")
+    logging.info(f"Arquivo temporário salvo como {new_path}.")
 
 
-def extract_pivot_data(worksheet, dynamic_table: str, task_num: int) -> None:
+def extract_data(worksheet, dynamic_table: str, task_num: int) -> None:
     """Extrai os dados da tabela dinâmica e salva como arquivo parquet.
 
     Args:
@@ -38,31 +45,70 @@ def extract_pivot_data(worksheet, dynamic_table: str, task_num: int) -> None:
         dynamic_table (str): Nome da tabela dinâmica.
         task_num (int): Número da tarefa para nomeação do arquivo de saída.
     """
-    logging.info(f"Extraindo dados da tabela {dynamic_table}")
-    pivot = next(p for p in worksheet._pivots if p.name == dynamic_table)
+    logging.info(f"Extraindo dados da tabela {dynamic_table}.")
+    pivot = next((p for p in worksheet._pivots if p.name == dynamic_table), None)
 
-    field_map = {}
-    for field in pivot.cache.cacheFields:
-        if field.sharedItems.count > 0:
-            field_map[field.name] = [item.v for item in field.sharedItems._fields]
+    if pivot is None:
+        logging.error(f"Tabela {dynamic_table} não encontrada.")
+        return
 
-    column_labels = [field.name for field in pivot.cache.cacheFields]
+    field_map = {
+        field.name: [item.v for item in field.sharedItems._fields]
+        for field in pivot.cache.cacheFields
+        if field.sharedItems.count > 0
+    }
+
+    col_labels = [field.name for field in pivot.cache.cacheFields]
+
     records = []
     for record in pivot.cache.records.r:
-        record_values = [
-            f.v if not isinstance(f, Missing) else np.nan for f in record._fields
-        ]
-        record_dict = dict(zip(column_labels, record_values))
-
-        for key in field_map:
-            record_dict[key] = field_map[key][record_dict[key]]
-
+        record_dict = {
+            column: f.v if not isinstance(f, Missing) else np.nan
+            for column, f in zip(col_labels, record._fields)
+        }
+        for k in field_map:
+            record_dict[k] = field_map[k][record_dict[k]]
         records.append(record_dict)
 
-    df = pd.DataFrame.from_dict(records)
+    df = ps.DataFrame(records)
     output_path = f"../data_output/raw/task{task_num + 1}"
-    df.to_parquet(output_path)
+    df.to_parquet(output_path, index_col="index")
     logging.info(f"Dados salvos em {output_path}")
+
+
+# def extract_data(worksheet, dynamic_table: str, task_num: int) -> None:
+#    """Extrai os dados da tabela dinâmica e salva como arquivo parquet.
+#
+#    Args:
+#        worksheet: Planilha.
+#        dynamic_table (str): Nome da tabela dinâmica.
+#        task_num (int): Número da tarefa para nomeação do arquivo de saída.
+#    """
+#    logging.info(f"Extraindo dados da tabela {dynamic_table}.")
+#    pivot = next(p for p in worksheet._pivots if p.name == dynamic_table)
+#
+#    field_map = {}
+#    for field in pivot.cache.cacheFields:
+#        if field.sharedItems.count > 0:
+#            field_map[field.name] = [item.v for item in field.sharedItems._fields]
+#
+#    column_labels = [field.name for field in pivot.cache.cacheFields]
+#    records = []
+#    for record in pivot.cache.records.r:
+#        record_values = [
+#            f.v if not isinstance(f, Missing) else np.nan for f in record._fields
+#        ]
+#        record_dict = dict(zip(column_labels, record_values))
+#
+#        for key in field_map:
+#            record_dict[key] = field_map[key][record_dict[key]]
+#
+#        records.append(record_dict)
+#
+#    df = ps.DataFrame.from_dict(records)
+#    output_path = f"../data_output/raw/task{task_num + 1}"
+#    df.to_parquet(output_path)
+#    logging.info(f"Dados salvos em {output_path}.")
 
 
 def main(xls_file: str, wb_name: str):
@@ -80,6 +126,9 @@ def main(xls_file: str, wb_name: str):
 
     workbook_path = file_path + "x"
     workbook = load_workbook(workbook_path)
+    workbook.close()
+    os.remove(workbook_path)
+    logging.info(f"Arquivo temporário {workbook_path} removido.")
     return workbook[wb_name]
 
 
@@ -89,4 +138,4 @@ if __name__ == "__main__":
     sheet = main(file, wb)
     dynamic_tables = ["Tabela dinâmica1", "Tabela dinâmica3"]
     for index, table in enumerate(dynamic_tables):
-        extract_pivot_data(sheet, table, index)
+        extract_data(sheet, table, index)

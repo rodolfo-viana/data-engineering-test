@@ -2,8 +2,9 @@ import os
 
 os.environ["PYARROW_IGNORE_TIMEZONE"] = "1"
 import datetime
+from pyspark import SparkContext
 import pyspark.pandas as ps
-import pyspark.sql.functions as f
+import pyspark.sql.functions as psf
 from pyspark.sql import DataFrame
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
@@ -32,8 +33,9 @@ def init_spark() -> SparkSession:
     Returns:
         SparkSession: Sessão do Spark inicializada.
     """
-    spark = SparkSession.builder.getOrCreate()
-    spark.conf.set(
+    sc = SparkContext.getOrCreate()
+    sc.setLogLevel("ERROR")
+    spark = SparkSession.builder.getOrCreate().conf.set(
         "spark.sql.legacy.timeParserPolicy", "LEGACY"
     )  # evita erro ao parsear data
     return spark
@@ -51,7 +53,7 @@ def load_data(
     Returns:
         ps.DataFrame: DataFrame carregado com os dados.
     """
-    return ps.read_parquet(os.path.join(path, f"task{task_number}"))
+    return ps.read_parquet(os.path.join(path, f"task{task_number}"), index_col="index")
 
 
 def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
@@ -119,7 +121,7 @@ def transform_data(df_pandas: ps.DataFrame) -> DataFrame:
         .replace({"MES": month_dict})
         .replace({"ESTADO": uf_dict})
     )
-    return df_pandas_melt.to_spark()
+    return df_pandas_melt.to_spark(index_col="index")
 
 
 def format_columns(df_spark: DataFrame, now: datetime.datetime) -> DataFrame:
@@ -133,23 +135,26 @@ def format_columns(df_spark: DataFrame, now: datetime.datetime) -> DataFrame:
         DataFrame: DataFrame após formatação.
     """
     return (
-        df_spark.withColumn("ANO", f.col("ANO").cast("integer"))
+        df_spark.withColumn("ANO", psf.col("ANO").cast("integer"))
         .withColumn(
             "MES",
-            f.when(f.length(f.col("MES")) == 1, f.concat(f.lit("0"), f.col("MES")))
-            .otherwise(f.col("MES"))
+            psf.when(
+                psf.length(psf.col("MES")) == 1,
+                psf.concat(psf.lit("0"), psf.col("MES")),
+            )
+            .otherwise(psf.col("MES"))
             .cast("integer"),
         )
         .withColumn(
             "year_month",
-            f.to_date(f.concat_ws("/", f.col("MES"), f.col("ANO")), "MM/yyyy"),
+            psf.to_date(psf.concat_ws("/", psf.col("MES"), psf.col("ANO")), "MM/yyyy"),
         )
-        .withColumn("uf", f.col("ESTADO"))
-        .withColumn("product", f.regexp_replace("COMBUSTÍVEL", "\s\([^\)]*\)", ""))
-        .withColumn("unit", f.col("UNIDADE"))
-        .withColumn("volume", f.col("VOLUME").cast("double"))
+        .withColumn("uf", psf.col("ESTADO"))
+        .withColumn("product", psf.regexp_replace("COMBUSTÍVEL", "\s\([^\)]*\)", ""))
+        .withColumn("unit", psf.col("UNIDADE"))
+        .withColumn("volume", psf.col("VOLUME").cast("double"))
         .withColumn(
-            "created_at", f.lit(now.strftime("%Y-%m-%d %H:%M:%S")).cast("timestamp")
+            "created_at", psf.lit(now.strftime("%Y-%m-%d %H:%M:%S")).cast("timestamp")
         )
         .select("year_month", "uf", "product", "unit", "volume", "created_at")
     )
@@ -165,12 +170,12 @@ def agg_data(df_spark: DataFrame) -> DataFrame:
         DataFrame: DataFrame de Spark com colunas adicionais.
     """
     window_spec = Window.partitionBy(
-        f.substring(f.col("year_month").cast("string"), 0, 4), "uf", "product"
+        psf.substring(psf.col("year_month").cast("string"), 0, 4), "uf", "product"
     )
 
     return df_spark.withColumn(
-        "amount_spark", f.sum("volume").over(window_spec)
-    ).withColumn("count_spark", f.count("*").over(window_spec))
+        "amount_spark", psf.sum("volume").over(window_spec)
+    ).withColumn("count_spark", psf.count("*").over(window_spec))
 
 
 def validate(df_spark: DataFrame, df_pandas: ps.DataFrame) -> (DataFrame, DataFrame):
@@ -183,54 +188,56 @@ def validate(df_spark: DataFrame, df_pandas: ps.DataFrame) -> (DataFrame, DataFr
     Returns:
         DataFrame, DataFrame: Resultados de validações para soma e contagem.
     """
-    df_pandas_validation = df_pandas.to_spark()
+    df_pandas_validation = df_pandas.to_spark(index_col="index")
 
     validate_amount = (
         df_spark.join(
             df_pandas_validation,
             (
-                f.substring(f.col("year_month").cast("string"), 0, 4)
+                psf.substring(psf.col("year_month").cast("string"), 0, 4)
                 == df_pandas_validation.ANO
             )
             & (df_spark.uf == df_pandas_validation.ESTADO)
             & (
-                f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == df_spark.product
+                psf.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "")
+                == df_spark.product
             ),
             "inner",
         )
         .select(
-            f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
+            psf.substring(psf.col("year_month").cast("string"), 0, 4).alias("year"),
             "uf",
             "product",
-            f.col("TOTAL").alias("amount_pandas").cast("float"),
-            f.col("amount_spark").cast("float"),
+            psf.col("TOTAL").alias("amount_pandas").cast("float"),
+            psf.col("amount_spark").cast("float"),
         )
-        .filter(f.col("amount_spark").cast("float") != f.col("TOTAL").cast("float"))
+        .filter(psf.col("amount_spark").cast("float") != psf.col("TOTAL").cast("float"))
     )
 
     validate_count = (
         df_spark.join(
             df_pandas_validation,
             (
-                f.substring(f.col("year_month").cast("string"), 0, 4)
+                psf.substring(psf.col("year_month").cast("string"), 0, 4)
                 == df_pandas_validation.ANO
             )
             & (df_spark.uf == df_pandas_validation.ESTADO)
             & (
-                f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == df_spark.product
+                psf.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "")
+                == df_spark.product
             ),
             "inner",
         )
         .select(
-            f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
+            psf.substring(psf.col("year_month").cast("string"), 0, 4).alias("year"),
             "uf",
             "product",
-            f.col("count_spark"),
-            f.count("*")
+            psf.col("count_spark"),
+            psf.count("*")
             .over(Window.partitionBy("ANO", "ESTADO", "COMBUSTÍVEL"))
             .alias("count_pandas"),
         )
-        .filter(f.col("count_spark") != f.col("count_pandas"))
+        .filter(psf.col("count_spark") != psf.col("count_pandas"))
     )
 
     return validate_amount, validate_count
