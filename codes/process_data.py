@@ -6,6 +6,24 @@ import pyspark.pandas as ps
 import pyspark.sql.functions as f
 from pyspark.sql import DataFrame
 from pyspark.sql import SparkSession
+from pyspark.sql.window import Window
+import smtplib
+from email.mime.text import MIMEText
+
+
+def send_email():
+    """Envia e-mail caso haja diferenças na validação."""
+    sender = "results023"
+    password = "uogifljnlomqwyds"
+    recipients = ["eu@rodolfoviana.com.br"]
+
+    msg = MIMEText("AVISO! Validação de DataFrames encontrou diferenças.")
+    msg["Subject"] = "Resultado da Validação de DataFrames"
+    msg["From"] = f"{sender}@gmail.com"
+    msg["To"] = ", ".join(recipients)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp_server:
+        smtp_server.login(sender, password)
+        smtp_server.sendmail(sender, recipients, msg.as_string())
 
 
 def init_spark() -> SparkSession:
@@ -137,79 +155,85 @@ def format_columns(df_spark: DataFrame, now: datetime.datetime) -> DataFrame:
     )
 
 
-def validate_data_amount(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
-    """Valida as somas entre DataFrame Spark e DataFrame pandas.
+def agg_data(df_spark: DataFrame) -> DataFrame:
+    """Realiza agregação com funções de window.
 
     Args:
-        df_spark (DataFrame): DataFrame Spark para validação.
-        df_pandas (ps.DataFrame): DataFrame do pandas para comparação.
+        df_spark (DataFrame): DataFrame de Spark.
 
     Returns:
-        DataFrame: DataFrame Spark após validação.
+        DataFrame: DataFrame de Spark com colunas adicionais.
+    """
+    window_spec = Window.partitionBy(
+        f.substring(f.col("year_month").cast("string"), 0, 4), "uf", "product"
+    )
+
+    return df_spark.withColumn(
+        "amount_spark", f.sum("volume").over(window_spec)
+    ).withColumn("count_spark", f.count("*").over(window_spec))
+
+
+def validate(df_spark: DataFrame, df_pandas: ps.DataFrame) -> (DataFrame, DataFrame):
+    """Validação com uso de funções de window.
+
+    Args:
+        df_spark (DataFrame): DataFrame de Spark com agregações.
+        df_pandas (ps.DataFrame): DataFrame de pandas original.
+
+    Returns:
+        DataFrame, DataFrame: Resultados de validações para soma e contagem.
     """
     df_pandas_validation = df_pandas.to_spark()
-    df_spark_validation = df_spark.groupBy(
-        [
+
+    validate_amount = (
+        df_spark.join(
+            df_pandas_validation,
+            (
+                f.substring(f.col("year_month").cast("string"), 0, 4)
+                == df_pandas_validation.ANO
+            )
+            & (df_spark.uf == df_pandas_validation.ESTADO)
+            & (
+                f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == df_spark.product
+            ),
+            "inner",
+        )
+        .select(
             f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
             "uf",
             "product",
-        ]
-    ).agg(f.sum("volume").alias("amount"))
-    validate_amount = df_spark_validation.join(
-        df_pandas_validation,
-        (df_spark_validation.year == df_pandas_validation.ANO)
-        & (df_spark_validation.uf == df_pandas_validation.ESTADO)
-        & (f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == f.col("product")),
-        "inner",
+            f.col("TOTAL").alias("amount_pandas").cast("float"),
+            f.col("amount_spark").cast("float"),
+        )
+        .filter(f.col("amount_spark").cast("float") != f.col("TOTAL").cast("float"))
     )
 
-    validation = validate_amount.select(
-        "year",
-        "uf",
-        "product",
-        f.col("TOTAL").alias("amount_pandas").cast("float"),
-        f.col("amount").alias("amount_spark").cast("float"),
-    ).filter(f.col("amount").cast("float") != f.col("TOTAL").cast("float"))
-    return validation
-
-
-def validate_data_count(df_spark: DataFrame, df_pandas: ps.DataFrame) -> DataFrame:
-    """Valida a contagem de registros entre DataFrame Spark e DataFrame pandas.
-
-    Args:
-        df_spark (DataFrame): DataFrame Spark para validação.
-        df_pandas (ps.DataFrame): DataFrame do pandas para comparação.
-
-    Returns:
-        DataFrame: DataFrame Spark após validação.
-    """
-    df_pandas_validation = df_pandas.to_spark()
-    df_spark_validation = df_spark.groupBy(
-        [
+    validate_count = (
+        df_spark.join(
+            df_pandas_validation,
+            (
+                f.substring(f.col("year_month").cast("string"), 0, 4)
+                == df_pandas_validation.ANO
+            )
+            & (df_spark.uf == df_pandas_validation.ESTADO)
+            & (
+                f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == df_spark.product
+            ),
+            "inner",
+        )
+        .select(
             f.substring(f.col("year_month").cast("string"), 0, 4).alias("year"),
             "uf",
             "product",
-        ]
-    ).agg(f.count("*").alias("count_spark"))
-    df_pandas_count = df_pandas_validation.groupBy(
-        ["ANO", "ESTADO", "COMBUSTÍVEL"]
-    ).agg(f.count("*").alias("count_pandas"))
-    validate_count = df_spark_validation.join(
-        df_pandas_count,
-        (df_spark_validation.year == df_pandas_count.ANO)
-        & (df_spark_validation.uf == df_pandas_count.ESTADO)
-        & (f.regexp_replace("COMBUSTÍVEL", "\\([^\\)]*\\)", "") == f.col("product")),
-        "inner",
+            f.col("count_spark"),
+            f.count("*")
+            .over(Window.partitionBy("ANO", "ESTADO", "COMBUSTÍVEL"))
+            .alias("count_pandas"),
+        )
+        .filter(f.col("count_spark") != f.col("count_pandas"))
     )
 
-    validation = validate_count.select(
-        "year",
-        "uf",
-        "product",
-        f.col("count_pandas"),
-        f.col("count_spark"),
-    ).filter(f.col("count_spark") != f.col("count_pandas"))
-    return validation
+    return validate_amount, validate_count
 
 
 def save_data(
@@ -229,25 +253,26 @@ def save_data(
 
 
 def main(task_number: int):
-    """Função para processamento e validação dos dados.
+    """Função para carregamento, processamento e validação dos dados.
 
     Args:
         task_number (int): Número da tarefa para carregar e salvar dados.
     """
-    spark = init_spark()
+    init_spark()
 
     now = datetime.datetime.now()
     df_pandas = load_data(task_number=task_number)
     df_spark = transform_data(df_pandas)
     df_spark = format_columns(df_spark, now)
 
-    validate_amount = validate_data_amount(df_spark, df_pandas)
+    df_spark_aggregated = agg_data(df_spark)
+    validate_amount, validate_count = validate(df_spark_aggregated, df_pandas)
     validate_amount.show()
-
-    validate_count = validate_data_count(df_spark, df_pandas)
     validate_count.show()
+    if validate_amount.count() > 0 or validate_count.count() > 0:
+        send_email()
 
-    save_data(df_spark, spark=spark, task_number=task_number)
+    save_data(df_spark, task_number=task_number)
 
 
 if __name__ == "__main__":
