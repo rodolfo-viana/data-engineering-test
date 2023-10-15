@@ -8,8 +8,19 @@ Os dados brutos estão em `data_output > raw`.
 
 Os dados processados estão em `data_output > processed`.
 
+As bibliotecas externas usadas foram:
 
-# Proposta inicial enviada pela Raízen
+- `apache-airflow==2.7.2`
+- `numpy==1.26.0`
+- `openpyxl==3.1.2`
+- `pandas==2.1.1`
+- `pyarrow==13.0.0`
+- `pyspark==3.5.0`
+- `pywin32==306`
+
+---
+
+# Proposta inicial
 
 Data Engineering Test
 =====================
